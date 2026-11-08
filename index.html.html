@@ -1,0 +1,312 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Smart Challenge Box</title>
+<style>
+body {
+  font-family: Arial;
+  text-align: center;
+  background: #101b35;
+  color: white;
+  padding: 20px;
+}
+button {
+  padding: 15px 22px;
+  margin: 9px;
+  border: 0;
+  border-radius: 12px;
+  font-size: 18px;
+  cursor: pointer;
+}
+#question {font-size: 30px; margin: 30px;}
+#status {font-size: 20px; min-height: 55px;}
+</style>
+</head>
+<body>
+
+<h1>SMART CHALLENGE BOX</h1>
+<h2 id="status">Connect your robot!</h2>
+
+<button onclick="connectHub()">Connect SPIKE</button>
+<button onclick="startGame()">Start Challenge</button>
+
+<div id="question">Are You Ready?</div>
+<div id="answer"></div>
+
+<button onclick="listenAnswer()">🎤 Speak Your Answer</button>
+<button onclick="closeBox()">Close Box</button>
+
+<script>
+const SERVICE =
+"0000fd02-0000-1000-8000-00805f9b34fb";
+
+const RX =
+"0000fd02-0001-1000-8000-00805f9b34fb";
+
+const TX =
+"0000fd02-0002-1000-8000-00805f9b34fb";
+
+let rxCharacteristic;
+let txCharacteristic;
+let connected = false;
+
+const questions = [
+  {q:"What is 8 plus 5?", a:"13"},
+  {q:"What is 6 times 4?", a:"24"},
+  {q:"How many days are in a week?", a:"7"}
+];
+
+let current = 0;
+
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+// SPIKE Prime COBS encoding
+function cobsEncode(data) {
+  let out = [];
+  let codeIndex = 0;
+  let block = 0;
+
+  function beginBlock() {
+    codeIndex = out.length;
+    out.push(0);
+    block = 1;
+  }
+
+  beginBlock();
+
+  for (const b of data) {
+    if (b > 2) {
+      out.push(b);
+      block++;
+    }
+
+    if (b <= 2 || block > 84) {
+      if (b <= 2) {
+        out[codeIndex] = block + 2 + b * 84;
+      } else {
+        out[codeIndex] = 255;
+      }
+      beginBlock();
+    }
+  }
+
+  out[codeIndex] = block + 2;
+  return out;
+}
+
+function packMessage(data) {
+  const encoded = cobsEncode(data);
+  return new Uint8Array([
+    ...encoded.map(b => b ^ 3),
+    2
+  ]);
+}
+
+async function sendMessage(data) {
+  if (!connected) throw new Error("Hub not connected");
+
+  const packet = packMessage(data);
+
+  if (rxCharacteristic.writeValueWithoutResponse) {
+    await rxCharacteristic.writeValueWithoutResponse(packet);
+  } else {
+    await rxCharacteristic.writeValue(packet);
+  }
+}
+
+async function connectHub() {
+  try {
+    document.getElementById("status").textContent =
+      "Searching for SPIKE Hub...";
+
+    const device = await navigator.bluetooth.requestDevice({
+      filters: [{services: [SERVICE]}]
+    });
+
+    const server = await device.gatt.connect();
+
+    const service = await server.getPrimaryService(SERVICE);
+
+    rxCharacteristic = await service.getCharacteristic(RX);
+    txCharacteristic = await service.getCharacteristic(TX);
+
+    await txCharacteristic.startNotifications();
+
+    txCharacteristic.addEventListener(
+      "characteristicvaluechanged",
+      event => {
+        const bytes = new Uint8Array(
+          event.target.value.buffer,
+          event.target.value.byteOffset,
+          event.target.value.byteLength
+        );
+        console.log("SPIKE response:", [...bytes]);
+      }
+    );
+
+    connected = true;
+
+    // Official protocol handshake
+    await sendMessage([0x00]);
+    await sleep(500);
+
+    document.getElementById("status").textContent =
+      "SPIKE Connected Successfully!";
+
+  } catch (error) {
+    document.getElementById("status").textContent =
+      "Connection error: " + error.message;
+  }
+}
+
+// Start a stored program in a Hub slot
+async function runHubSlot(slot) {
+  // 0x1E = ProgramFlowRequest
+  // 0x00 = Start
+  await sendMessage([0x1E, 0x00, slot]);
+}
+
+// Play a short sound effect on Android
+function soundEffect(success) {
+  const AudioContext =
+    window.AudioContext || window.webkitAudioContext;
+
+  const audio = new AudioContext();
+  const oscillator = audio.createOscillator();
+  const gain = audio.createGain();
+
+  oscillator.connect(gain);
+  gain.connect(audio.destination);
+
+  oscillator.frequency.value = success ? 880 : 220;
+  gain.gain.value = 0.15;
+
+  oscillator.start();
+  oscillator.stop(audio.currentTime + 0.25);
+}
+
+function startGame() {
+  current = 0;
+  showQuestion();
+}
+
+function showQuestion() {
+  document.getElementById("question").textContent =
+    questions[current].q;
+
+  document.getElementById("answer").textContent = "";
+  document.getElementById("status").textContent =
+    "Listen and answer!";
+}
+
+function normalizeAnswer(text) {
+  const words = {
+    "thirteen":"13", "twelve":"12",
+    "twenty four":"24", "twenty-four":"24",
+    "seven":"7", "seven days":"7",
+    "twenty":"20", "five":"5"
+  };
+
+  const value = text.toLowerCase().trim();
+  return words[value] || value.replace(/[^a-z0-9]/g, "");
+}
+
+async function listenAnswer() {
+  const Recognition =
+    window.SpeechRecognition ||
+    window.webkitSpeechRecognition;
+
+  if (!Recognition) {
+    alert("Speech recognition is not supported.");
+    return;
+  }
+
+  const recognition = new Recognition();
+  recognition.lang = "en-US";
+  recognition.continuous = false;
+  recognition.interimResults = false;
+
+  document.getElementById("status").textContent =
+    "Listening... Speak now!";
+
+  recognition.onresult = async event => {
+    const spoken = event.results[0][0].transcript;
+    const result = normalizeAnswer(spoken);
+    const correct = questions[current].a;
+
+    document.getElementById("answer").textContent =
+      "You said: " + spoken;
+
+    if (result === correct) {
+      document.getElementById("status").textContent =
+        "CORRECT! You won!";
+
+      soundEffect(true);
+
+      try {
+        await runHubSlot(0);
+      } catch (error) {
+        document.getElementById("status").textContent =
+          "Correct, but Hub command failed: " + error.message;
+        return;
+      }
+
+      document.getElementById("question").textContent =
+        "CONGRATULATIONS! Collect your gift!";
+
+    } else {
+      document.getElementById("status").textContent =
+        "Wrong Answer! Try Again!";
+
+      soundEffect(false);
+    }
+  };
+
+  recognition.onerror = event => {
+    document.getElementById("status").textContent =
+      "Voice error: " + event.error;
+  };
+
+  recognition.start();
+}
+
+async function closeBox() {
+  try {
+    await runHubSlot(1);
+    document.getElementById("status").textContent =
+      "The box is closed!";
+  } catch (error) {
+    document.getElementById("status").textContent =
+      "Close error: " + error.message;
+  }
+}
+</script>
+</body>
+</html>
+function normalizeAnswer(text) {
+  const value = text.toLowerCase()
+    .trim()
+    .replace(/[?.!,]/g, "")
+    .replace(/\s+/g, " ");
+
+  const words = {
+    "thirteen": "13",
+    "twelve": "12",
+    "twenty four": "24",
+    "twenty-four": "24",
+    "seven": "7",
+    "seven days": "7"
+  };
+
+  return words[value] || value.replace(/[^a-z0-9]/g, "");
+}
+<button onclick="nextPuzzle()">Next Puzzle</button>
+function nextPuzzle() {
+  current = (current + 1) % questions.length;
+  showQuestion();
+}
